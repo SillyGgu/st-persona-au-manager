@@ -1,9 +1,62 @@
+/* PC: 기존 디자인 유지 */
 .ps-wrapper { padding: 5px; }
 .ps-item { 
-    display: flex; justify-content: space-between; align-items: center; 
-    background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px; border: 1px solid var(--SmartThemeBorderColor);
+    display: flex; 
+    justify-content: space-between; 
+    align-items: center; 
+    background: rgba(0,0,0,0.2); 
+    padding: 10px; 
+    border-radius: 8px; 
+    border: 1px solid var(--SmartThemeBorderColor);
+    margin-bottom: 5px;
 }
-.ps-item-info { display: flex; flex-direction: column; }
+.ps-item-info { 
+    display: flex; 
+    flex-direction: column; 
+    justify-content: center; /* 수직 중앙 정렬 */
+}
 .ps-item-name { font-weight: bold; font-size: 1.1em; color: var(--mainColor); }
 .ps-item-meta { font-size: 0.8em; opacity: 0.6; }
 .ps-btn-group { display: flex; gap: 5px; }
+
+/* 모바일 전용 최적화 */
+@media screen and (max-width: 600px) {
+    /* 모바일에서만 너비 제한 해제 (화면에 맞게) */
+    .ps-wrapper { 
+        min-width: 100% !important; 
+        max-width: 100%;
+        box-sizing: border-box;
+    }
+
+    /* 목록 아이템: 이름/날짜는 왼쪽, 버튼은 오른쪽 유지하되 공간 부족시 자연스럽게 조절 */
+    .ps-item {
+        padding: 12px 10px;
+    }
+
+    /* 입력창과 '현재 상태 저장' 버튼이 겹치지 않게 세로로 배치 */
+    .ps-footer-row {
+        flex-direction: column !important;
+        gap: 8px !important;
+    }
+    
+    #ps_new_name {
+        width: 100% !important;
+    }
+
+    #ps_btn_save {
+        width: 100% !important;
+        text-align: center;
+    }
+
+    /* 하단 가져오기/백업 버튼 가로 배치 최적화 */
+    .ps-footer-buttons {
+        display: flex;
+        gap: 5px;
+    }
+    
+    .ps-footer-buttons button {
+        flex: 1;
+        font-size: 0.8em !important;
+        padding: 8px 2px !important;
+    }
+}

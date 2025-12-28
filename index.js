@@ -225,12 +225,12 @@ async function openSwitcherModal() {
     }
 
     const listHtml = versions.map((v, idx) => `
-        <div class="ps-item" style="display:flex; justify-content:space-between; align-items:center; background:rgba(0,0,0,0.2); padding:10px; margin-bottom:5px; border-radius:5px;">
-            <div class="ps-info">
-                <div style="font-weight:bold; color:var(--mainColor);">${v.name}</div>
-                <div style="font-size:0.8em; opacity:0.6;">${new Date(v.date).toLocaleString()}</div>
+        <div class="ps-item">
+            <div class="ps-info" style="display:flex; flex-direction:column; justify-content:center;">
+                <div style="font-weight:bold; color:var(--mainColor); text-align:left;">${v.name}</div>
+                <div style="font-size:0.8em; opacity:0.6; text-align:left;">${new Date(v.date).toLocaleString()}</div>
             </div>
-            <div class="ps-actions" style="display:flex; gap:5px;">
+            <div class="ps-actions" style="display:flex; gap:5px; align-items:center;">
                 <button class="menu_button ps-btn-apply" data-idx="${idx}" style="white-space:nowrap;">적용</button>
                 <button class="menu_button ps-btn-delete" data-idx="${idx}" style="background-color:rgba(255,0,0,0.1); color:red; white-space:nowrap;">삭제</button>
             </div>
@@ -247,11 +247,11 @@ async function openSwitcherModal() {
                 ${listHtml}
             </div>
             <div class="ps-footer" style="margin-top:20px;">
-                <div style="display:flex; gap:10px; margin-bottom:10px;">
+                <div class="ps-footer-row" style="display:flex; gap:10px; margin-bottom:10px;">
                     <input type="text" id="ps_new_name" class="text_display" placeholder="새 버전 이름" style="flex:1;">
                     <button id="ps_btn_save" class="menu_button" style="white-space:nowrap;">현재 상태 저장</button>
                 </div>
-                <div style="display:flex; justify-content:flex-end; gap:5px; align-items:center;">
+                <div class="ps-footer-buttons" style="display:flex; justify-content:flex-end; gap:5px; align-items:center;">
                     <input type="file" id="ps_import_file" style="display:none;" accept=".json">
                     <button id="ps_btn_import" class="menu_button" style="font-size:0.85em; white-space:nowrap; flex:1;">JSON 가져오기</button>
                     <button id="ps_btn_backup" class="menu_button" style="font-size:0.85em; white-space:nowrap; flex:1;">JSON 백업</button>
