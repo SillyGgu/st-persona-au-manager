@@ -1,0 +1,45 @@
+.persona-alt-container {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 300px;
+}
+
+.persona-alt-list {
+    max-height: 400px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.persona-alt-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: rgba(0, 0, 0, 0.2);
+    padding: 8px;
+    border-radius: 4px;
+    border: 1px solid var(--SmartThemeBorderColor);
+}
+
+.alt-title-input {
+    background: transparent !important;
+    border: none !important;
+    color: var(--smart-theme-body-color);
+    flex-grow: 1;
+    margin-right: 10px;
+}
+
+.alt-actions {
+    display: flex;
+    gap: 5px;
+}
+
+.use-alt-btn {
+    background-color: rgba(40, 167, 69, 0.2) !important;
+}
+
+.delete-alt-btn {
+    background-color: rgba(220, 53, 69, 0.2) !important;
+}

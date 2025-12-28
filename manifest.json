@@ -1,0 +1,10 @@
+{
+    "display_name": "Persona AU Manager",
+    "name": "st-persona-au-manager",
+    "version": "1.0.0",
+    "author": "YourName",
+    "description": "페르소나의 다양한 AU 버전을 관리하고 원클릭으로 교체합니다.",
+    "js": "index.js",
+    "css": "style.css",
+    "type": "extension"
+}
