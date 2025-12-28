@@ -1,10 +1,11 @@
 {
-    "display_name": "Persona AU Switcher",
+    "display_name": "페르소나 AU 관리자",
     "name": "st-persona-switcher",
     "version": "1.0.1",
     "author": "YourName",
     "description": "유저 페르소나(User Persona)의 AU 버전을 관리하고 원클릭으로 교체합니다.",
     "js": "index.js",
     "css": "style.css",
-    "type": "extension"
+    "type": "extension",
+    "homePage": "https://github.com/SillyGgu/st-persona-au-manager"
 }

@@ -71,13 +71,11 @@ function updateActiveTagUI() {
     const $header = $('span[data-i18n="Persona Description"]').closest('h4.flex-container.alignItemsBaseline');
     if ($header.length === 0) return;
 
-    // 태그가 이미 있고 내용이 같다면 다시 그리지 않음
     const $existingTag = $header.find('.ps-active-tag');
     if ($existingTag.length > 0 && $existingTag.attr('data-version') === activeVersion) {
         return; 
     }
 
-    // 기존 태그 제거 후 새로 생성
     $existingTag.remove();
 
     const tagHtml = `
@@ -110,9 +108,7 @@ function updateActiveTagUI() {
         $header.append(tagHtml);
     }
 
-    // 클릭 이벤트 바인딩
     $('.ps-active-tag').off('click').on('click', function(e) {
-        // 팝업 내부의 아이템을 클릭한 것이라면 함수 종료 (버블링 방지)
         if ($(e.target).closest('#ps-quick-popup').length > 0) {
             return;
         }
@@ -122,11 +118,9 @@ function updateActiveTagUI() {
 
         const $popup = $('#ps-quick-popup');
         if ($popup.length > 0) {
-            // 이미 켜져있다면 닫기
             $popup.remove();
             $(document).off('click.psQuickClose');
         } else {
-            // 꺼져있다면 열기
             showQuickPopup(e, $(this));
         }
     });
@@ -144,7 +138,6 @@ function showQuickPopup(event, $tagElement) {
         return;
     }
 
-    // 기존 팝업 제거
     $('#ps-quick-popup').remove();
 
     const $popup = $('<div id="ps-quick-popup"></div>').css({
@@ -185,16 +178,14 @@ function showQuickPopup(event, $tagElement) {
     $popup.append(listHtml);
     $tagElement.append($popup);
 
-    // 호버 효과
     $popup.find('.ps-quick-item').hover(
         function() { $(this).css('background', '#f0f0f0'); },
         function() { $(this).css('background', 'transparent'); }
     );
 
-    // 아이템 클릭 이벤트
     $popup.find('.ps-quick-item').on('click', function(e) {
         e.preventDefault();
-        e.stopPropagation(); // 태그 클릭 이벤트로 번지지 않게 차단
+        e.stopPropagation(); 
         
         const targetName = $(this).data('name');
         const targetVer = versions.find(v => v.name === targetName);
@@ -205,10 +196,8 @@ function showQuickPopup(event, $tagElement) {
         $(document).off('click.psQuickClose');
     });
 
-    // 외부 클릭 시 닫기 (약간의 지연을 주어 클릭 이벤트가 겹치지 않게 함)
     setTimeout(() => {
         $(document).off('click.psQuickClose').on('click.psQuickClose', function(e) {
-            // 클릭된 대상이 태그(.ps-active-tag) 자체가 아닐 때만 닫기
             if (!$(e.target).closest('.ps-active-tag').length) {
                 $('#ps-quick-popup').remove();
                 $(document).off('click.psQuickClose');
@@ -346,6 +335,6 @@ function addLauncherButton() {
     updateActiveTagUI();
 }
 
-// 실행
+
 initSettings();
 setInterval(addLauncherButton, 1000);
