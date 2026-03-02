@@ -37,7 +37,7 @@ function getActivePersonaData() {
 
 
 /**
- * [신규] 아바타 오버라이드 CSS 갱신 (채팅창 전용)
+ * 아바타 오버라이드 CSS 갱신 (채팅창 전용)
  */
 function refreshAvatarOverride() {
     const activeData = getActivePersonaData();
@@ -51,7 +51,6 @@ function refreshAvatarOverride() {
     }
 
     if (currentVersion && currentVersion.overrideAvatar) {
-        // 기존 ST의 유저 아바타 이미지를 CSS content 속성으로 덮어씌움
         $style.html(`
             .mes[is_user="true"] .mesAvatarWrapper .avatar img {
                 content: url('${currentVersion.overrideAvatar}') !important;
@@ -64,13 +63,12 @@ function refreshAvatarOverride() {
 }
 
 /**
- * [신규] 이미지 에디터 모달 (드래그, 줌 지원, 원본 및 좌표 저장)
+ * 이미지 에디터 모달 (드래그, 줌 지원, 원본 및 좌표 저장)
  */
 function openImageEditor(activeName, versions, idx) {
     const version = versions[idx];
     $('#ps-image-editor-modal').remove();
 
-    // 1. 현재 테마의 유저 아바타 비율 감지
     let targetRatio = 1; // 기본 1:1
     const $userAvatar = $('.mes[is_user="true"] .avatar').last(); 
     const $sidebarAvatar = $('#avatar_user'); 
