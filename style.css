@@ -1,5 +1,10 @@
-/* PC: 기존 디자인 유지 */
-.ps-wrapper { padding: 5px; }
+/* PC: 기존 디자인 유지 및 스크롤바 수정 */
+.ps-wrapper { 
+    padding: 5px; 
+    box-sizing: border-box; 
+    overflow-x: hidden; /* 가로 스크롤 방지 */
+    width: 100%;
+}
 .ps-item { 
     display: flex; 
     justify-content: space-between; 
@@ -13,27 +18,33 @@
 .ps-item-info { 
     display: flex; 
     flex-direction: column; 
-    justify-content: center; /* 수직 중앙 정렬 */
+    justify-content: center; 
 }
 .ps-item-name { font-weight: bold; font-size: 1.1em; color: var(--mainColor); }
 .ps-item-meta { font-size: 0.8em; opacity: 0.6; }
 .ps-btn-group { display: flex; gap: 5px; }
 
+/* 하단 버튼 컨테이너 최적화 */
+.ps-footer-buttons {
+    display: flex;
+    justify-content: flex-end;
+    gap: 5px;
+    align-items: center;
+    width: 100%; /* 컨테이너 꽉 채우기 */
+    box-sizing: border-box;
+}
+
 /* 모바일 전용 최적화 */
 @media screen and (max-width: 600px) {
-    /* 모바일에서만 너비 제한 해제 (화면에 맞게) */
     .ps-wrapper { 
         min-width: 100% !important; 
         max-width: 100%;
-        box-sizing: border-box;
     }
 
-    /* 목록 아이템: 이름/날짜는 왼쪽, 버튼은 오른쪽 유지하되 공간 부족시 자연스럽게 조절 */
     .ps-item {
         padding: 12px 10px;
     }
 
-    /* 입력창과 '현재 상태 저장' 버튼이 겹치지 않게 세로로 배치 */
     .ps-footer-row {
         flex-direction: column !important;
         gap: 8px !important;
@@ -48,15 +59,98 @@
         text-align: center;
     }
 
-    /* 하단 가져오기/백업 버튼 가로 배치 최적화 */
-    .ps-footer-buttons {
-        display: flex;
-        gap: 5px;
-    }
-    
+    /* 모바일 버튼 균등 배치 */
     .ps-footer-buttons button {
         flex: 1;
         font-size: 0.8em !important;
         padding: 8px 2px !important;
     }
+}
+
+/* PS 아바타 이미지 에디터 팝업 전용 스타일 */
+#ps-image-editor-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.5); /* 배경 어둡게 */
+    z-index: 20000; /* ST 패널보다 높게 */
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    backdrop-filter: blur(2px);
+}
+
+.ps-editor-container {
+    background: #ffffff; /* 완전 흰색 배경 */
+    color: #000000; /* 검은 글씨 */
+    border: 2px solid #ccc;
+    padding: 20px;
+    border-radius: 12px;
+    text-align: center;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    width: 320px;
+    max-width: 90vw;
+    box-sizing: border-box;
+}
+
+#ps-crop-viewport {
+    width: 200px;
+    height: 200px;
+    border: 2px dashed #0096ff; /* 파란색 테두리 */
+    border-radius: 8px;
+    margin: 15px auto;
+    overflow: hidden;
+    position: relative;
+    background: #f0f0f0; /* 뷰포트 배경 회색 */
+    cursor: grab;
+    touch-action: none;
+}
+#ps-crop-viewport:active {
+    cursor: grabbing;
+}
+#ps-crop-img {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform-origin: center;
+    pointer-events: none;
+    display: none;
+}
+
+.ps-editor-btn-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: center;
+    margin-top: 20px;
+}
+
+/* 버튼 스타일 강화 */
+.ps-editor-btn-group button {
+    flex: 1 1 45%;
+    font-size: 14px;
+    font-weight: bold;
+    padding: 10px 5px;
+    border: 1px solid #aaa;
+    border-radius: 6px;
+    cursor: pointer;
+    background-color: #eee;
+    color: #333;
+}
+.ps-editor-btn-group button:hover {
+    background-color: #ddd;
+}
+
+/* 주요 버튼 색상 강조 */
+#ps-btn-img-save {
+    background-color: #007bff !important;
+    color: white !important;
+    border-color: #0056b3 !important;
+}
+#ps-btn-img-delete {
+    background-color: #fff0f0 !important;
+    color: #d9534f !important;
+    border-color: #d9534f !important;
 }
