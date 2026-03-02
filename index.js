@@ -87,7 +87,6 @@ function openImageEditor(activeName, versions, idx) {
         targetRatio = baseWidth / baseHeight;
     }
 
-    // 2. 에디터 뷰포트 크기 계산 (최대 250px 기준)
     let viewW = 220;
     let viewH = 220;
     
@@ -181,7 +180,7 @@ function openImageEditor(activeName, versions, idx) {
         updateTransform();
     }, { passive: false });
 
-viewport.addEventListener('mousedown', (e) => {
+    viewport.addEventListener('mousedown', (e) => {
         e.stopPropagation();
         isDragging = true; startX = e.clientX - posX; startY = e.clientY - posY;
     });
