@@ -1,7 +1,7 @@
 {
     "display_name": "페르소나 AU 관리자",
     "name": "st-persona-switcher",
-    "version": "2.0.0",
+    "version": "2.0.1",
     "author": "YourName",
     "description": "유저 페르소나의 AU 버전을 관리하고 원클릭으로 교체합니다.",
     "js": "index.js",

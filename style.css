@@ -172,3 +172,66 @@
     color: #d9534f !important;
     border-color: #d9534f !important;
 }
+
+/* ST 업데이트 대응: persona_controls 두줄 방지 */
+#persona_controls {
+    flex-wrap: wrap !important;
+    align-items: center !important;
+    overflow: hidden !important;
+}
+
+#persona_controls #your_name {
+    flex: 0 0 100% !important;
+    width: 100% !important;
+    margin-bottom: 0 !important;
+    padding-bottom: 0 !important;
+}
+
+#persona_controls .persona_controls_buttons_block {
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
+    flex-wrap: nowrap !important;
+    overflow: hidden !important;
+    gap: 6px !important;
+    margin-top: 4px !important;
+}
+
+#persona_controls .persona_controls_buttons_block .menu_button {
+    flex-shrink: 1 !important;
+    min-width: 0 !important;
+    width: 32px !important;
+    height: 32px !important;
+    padding: 0 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    overflow: hidden !important;
+}
+
+#persona_controls label.flex1 {
+    flex: 0 1 auto !important;
+    min-width: 60px !important;
+    max-width: 120px !important;
+    overflow: hidden !important;
+    margin-top: 4px !important;
+}
+
+#persona_controls label.flex1 select {
+    min-width: 0 !important;
+    width: 100% !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+}
+
+/* 모바일: 버튼 줄은 스크롤 가능하되 스크롤바 숨김 */
+@media screen and (max-width: 600px) {
+    #persona_controls .persona_controls_buttons_block {
+        overflow-x: auto !important;
+        -ms-overflow-style: none !important;
+        scrollbar-width: none !important;
+    }
+
+    #persona_controls .persona_controls_buttons_block::-webkit-scrollbar {
+        display: none !important;
+    }
+}
