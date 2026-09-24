@@ -1,9 +1,9 @@
 {
     "display_name": "페르소나 AU 관리자",
     "name": "st-persona-switcher",
-    "version": "2.0.1",
-    "author": "YourName",
-    "description": "유저 페르소나의 AU 버전을 관리하고 원클릭으로 교체합니다.",
+    "version": "3.0.2",
+    "author": "SillyGgu",
+    "description": "페르소나별 AU를 만들고 수정·적용하며 PNG로 내보내고 가져옵니다.",
     "js": "index.js",
     "css": "style.css",
     "type": "extension",
