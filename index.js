@@ -6,8 +6,14 @@ import { embedPersonaData, readPersonaData } from './persona-png.mjs';
 
 const KEY = 'st-persona-switcher'; // Preserve existing settings.
 const BUTTON_ID = 'ps-switcher-btn';
+const QUICK_ID = 'ps-quick-trigger';
 const STYLE_ID = 'ps-avatar-override-style';
 let dialog;
+let quickMenu;
+let avatarRequest = 0;
+let pendingAvatarData = null;
+let appliedAvatarData = null;
+let appliedAvatarUrl = null;
 
 function settings() {
     const data = extension_settings[KEY] ??= {};
@@ -69,9 +75,107 @@ function updateLauncher() {
     const persona = currentPersona();
     control.disabled = !persona;
     control.title = persona ? `AU 관리${activeName(persona.id) ? ` · ${activeName(persona.id)}` : ''}` : '페르소나를 먼저 선택하세요';
+    updateQuickSwitch();
 }
 
-function refreshAvatar() {
+function closeQuickMenu() {
+    quickMenu?.remove();
+    quickMenu = null;
+    document.removeEventListener('mousedown', onQuickOutside, true);
+    document.removeEventListener('touchstart', onQuickOutside, true);
+    window.removeEventListener('scroll', onQuickScroll, true);
+    document.getElementById(QUICK_ID)?.setAttribute('aria-expanded', 'false');
+}
+
+function onQuickOutside(event) {
+    if (!quickMenu?.contains(event.target) && !document.getElementById(QUICK_ID)?.contains(event.target)) closeQuickMenu();
+}
+
+function onQuickScroll(event) {
+    if (!quickMenu?.contains(event.target)) closeQuickMenu();
+}
+
+function updateQuickSwitch() {
+    const heading = document.querySelector('#persona_description')?.previousElementSibling;
+    if (heading?.tagName !== 'H4') return;
+    let trigger = document.getElementById(QUICK_ID);
+    if (!trigger || trigger.parentElement !== heading) {
+        trigger?.remove();
+        trigger = document.createElement('button');
+        trigger.id = QUICK_ID;
+        trigger.type = 'button';
+        trigger.setAttribute('aria-haspopup', 'menu');
+        trigger.setAttribute('aria-expanded', 'false');
+        trigger.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (quickMenu) closeQuickMenu();
+            else showQuickMenu(trigger);
+        });
+        heading.querySelector('.editor_maximize')?.before(trigger);
+        if (!trigger.isConnected) heading.append(trigger);
+    }
+    const persona = currentPersona();
+    const count = persona ? versionsFor(persona).length : 0;
+    trigger.disabled = !persona;
+    trigger.textContent = `AU · ${persona ? (activeName(persona.id) || '기본') : '없음'}`;
+    trigger.title = count ? `빠른 AU 전환 · ${count}개` : 'AU 관리창에서 새 AU를 만드세요';
+}
+
+function showQuickMenu(trigger) {
+    const persona = currentPersona();
+    if (!persona) return;
+    const versions = versionsFor(persona);
+    if (!versions.length) return openManager();
+    const menu = document.createElement('div');
+    menu.className = 'ps-quick-menu';
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-label', '빠른 AU 전환');
+    keepPersonaDrawerOpen(menu);
+    for (const version of versions) {
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'ps-quick-item';
+        item.setAttribute('role', 'menuitem');
+        if (version.name === activeName(persona.id)) item.setAttribute('aria-current', 'true');
+        item.textContent = version.name;
+        item.title = version.name;
+        item.addEventListener('click', () => {
+            closeQuickMenu();
+            applyVersion(persona, version);
+        });
+        menu.append(item);
+    }
+    const manage = document.createElement('button');
+    manage.type = 'button';
+    manage.className = 'ps-quick-manage';
+    manage.textContent = 'AU 관리…';
+    manage.addEventListener('click', () => { closeQuickMenu(); openManager(); });
+    menu.append(manage);
+    menu.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            event.stopPropagation();
+            closeQuickMenu();
+            trigger.focus();
+        }
+    });
+    document.body.append(menu);
+    quickMenu = menu;
+    trigger.setAttribute('aria-expanded', 'true');
+    const rect = trigger.getBoundingClientRect();
+    const width = Math.min(280, window.innerWidth - 16);
+    menu.style.width = `${width}px`;
+    menu.style.left = `${Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8))}px`;
+    const menuHeight = menu.getBoundingClientRect().height;
+    menu.style.top = `${rect.bottom + 4 + menuHeight > window.innerHeight ? Math.max(8, rect.top - menuHeight - 4) : rect.bottom + 4}px`;
+    document.addEventListener('mousedown', onQuickOutside, true);
+    document.addEventListener('touchstart', onQuickOutside, true);
+    window.addEventListener('scroll', onQuickScroll, true);
+    menu.querySelector('button')?.focus({ preventScroll: true });
+}
+
+async function refreshAvatar() {
     let style = document.getElementById(STYLE_ID);
     if (!style) {
         style = document.createElement('style');
@@ -80,11 +184,55 @@ function refreshAvatar() {
     }
     const persona = currentPersona();
     const version = persona && versionsFor(persona).find(v => v.name === activeName(persona.id));
-    const url = version?.overrideAvatar;
-    const nextStyle = url && /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(url)
-        ? `.mes[is_user="true"][force_avatar="false"] .mesAvatarWrapper .avatar { background-image: url("${url}") !important; background-size: cover !important; background-position: center !important; } .mes[is_user="true"][force_avatar="false"] .mesAvatarWrapper .avatar img { opacity: 0 !important; }`
-        : '';
-    if (style.textContent !== nextStyle) style.textContent = nextStyle;
+    const data = version?.overrideAvatar ?? null;
+    if (data === pendingAvatarData) return;
+    if (data === appliedAvatarData && pendingAvatarData === null) return;
+    const request = ++avatarRequest;
+    pendingAvatarData = data;
+    if (data === appliedAvatarData) {
+        pendingAvatarData = null;
+        return;
+    }
+    if (!data) {
+        style.textContent = '';
+        if (appliedAvatarUrl) URL.revokeObjectURL(appliedAvatarUrl);
+        appliedAvatarUrl = null;
+        appliedAvatarData = null;
+        pendingAvatarData = null;
+        return;
+    }
+    if (!/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(data)) {
+        pendingAvatarData = null;
+        style.textContent = '';
+        if (appliedAvatarUrl) URL.revokeObjectURL(appliedAvatarUrl);
+        appliedAvatarUrl = null;
+        appliedAvatarData = null;
+        return;
+    }
+    try {
+        const blob = await (await fetch(data)).blob();
+        if (blob.size > 5 * 1024 * 1024 || !/^image\/(?:png|jpeg|webp)$/.test(blob.type)) throw new Error('Invalid AU avatar');
+        const objectUrl = URL.createObjectURL(blob);
+        if (request !== avatarRequest) {
+            URL.revokeObjectURL(objectUrl);
+            return;
+        }
+        const previousUrl = appliedAvatarUrl;
+        style.textContent = `.mes[is_user="true"][force_avatar="false"] .mesAvatarWrapper .avatar { background-image: url("${objectUrl}") !important; background-size: cover !important; background-position: center !important; } .mes[is_user="true"][force_avatar="false"] .mesAvatarWrapper .avatar img { opacity: 0 !important; }`;
+        appliedAvatarUrl = objectUrl;
+        appliedAvatarData = data;
+        pendingAvatarData = null;
+        if (previousUrl) URL.revokeObjectURL(previousUrl);
+    } catch (error) {
+        if (request === avatarRequest) {
+            pendingAvatarData = null;
+            style.textContent = '';
+            if (appliedAvatarUrl) URL.revokeObjectURL(appliedAvatarUrl);
+            appliedAvatarUrl = null;
+            appliedAvatarData = null;
+        }
+        console.warn('[Persona AU Manager] AU avatar could not be displayed', error);
+    }
 }
 
 function button(label, action, className = '') {
@@ -116,6 +264,7 @@ function formatDate(value) {
 
 function renderManager(persona, selectedName = '') {
     if (!dialog?.isConnected) return;
+    updateQuickSwitch();
     const list = dialog.querySelector('.ps-list');
     const editor = dialog.querySelector('.ps-editor');
     const versions = versionsFor(persona);
@@ -205,10 +354,14 @@ function applyVersion(persona, version) {
     if (user_avatar !== persona.id) return toastr.warning('페르소나가 변경되었습니다. AU 관리창을 다시 열어 주세요.');
     const field = document.getElementById('persona_description');
     if (!field) return toastr.error('ST 페르소나 설명 입력란을 찾지 못했습니다.');
-    field.value = version.desc;
-    field.dispatchEvent(new Event('input', { bubbles: true })); // Let ST update its descriptor and emit PERSONA_UPDATED.
+    const descriptionChanged = field.value !== version.desc || currentPersona()?.description !== version.desc;
     settings().activeVersionByAvatar[persona.id] = version.name;
-    saveSettingsDebounced();
+    if (descriptionChanged) {
+        field.value = version.desc;
+        field.dispatchEvent(new Event('input', { bubbles: true })); // ST updates its descriptor and schedules one save.
+    } else {
+        saveSettingsDebounced();
+    }
     refreshAvatar();
     updateLauncher();
     renderManager(persona, version.name);
@@ -333,6 +486,7 @@ async function importFile(persona, file) {
 function openManager() {
     const persona = currentPersona();
     if (!persona) return toastr.warning('페르소나를 먼저 선택하세요.');
+    closeQuickMenu();
     if (dialog?.open) return;
     dialog = document.createElement('dialog');
     const modal = dialog;
@@ -372,7 +526,7 @@ function openManager() {
 settings();
 updateLauncher();
 refreshAvatar();
-eventSource.on(event_types.PERSONA_CHANGED, () => { if (dialog?.open) dialog.close(); updateLauncher(); refreshAvatar(); });
+eventSource.on(event_types.PERSONA_CHANGED, () => { closeQuickMenu(); if (dialog?.open) dialog.close(); updateLauncher(); refreshAvatar(); });
 eventSource.on(event_types.PERSONA_DELETED, ({ avatarId, name }) => {
     const data = settings();
     let changed = false;
@@ -412,4 +566,6 @@ eventSource.on(event_types.PERSONA_RENAMED, () => {
 });
 // Watch only the persona drawer: ST may replace its controls while rendering.
 const panel = document.getElementById('persona-management-button');
-if (panel) new MutationObserver(() => { if (!document.getElementById(BUTTON_ID)) updateLauncher(); }).observe(panel, { childList: true, subtree: true });
+if (panel) new MutationObserver(() => {
+    if (!document.getElementById(BUTTON_ID) || !document.getElementById(QUICK_ID)) updateLauncher();
+}).observe(panel, { childList: true, subtree: true });
