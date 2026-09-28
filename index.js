@@ -4,7 +4,8 @@ import { power_user } from '../../../power-user.js';
 import { getUserAvatar, user_avatar } from '../../../personas.js';
 import { embedPersonaData, readPersonaData } from './persona-png.mjs';
 
-const KEY = 'st-persona-switcher'; // Preserve existing settings.
+const KEY = 'st-persona-au-manager';
+const LEGACY_KEY = 'st-persona-switcher';
 const BUTTON_ID = 'ps-switcher-btn';
 const QUICK_ID = 'ps-quick-trigger';
 const STYLE_ID = 'ps-avatar-override-style';
@@ -14,8 +15,25 @@ let avatarRequest = 0;
 let pendingAvatarData = null;
 let appliedAvatarData = null;
 let appliedAvatarUrl = null;
+const warnedLegacyNames = new Set();
 
 function settings() {
+    const legacy = extension_settings[LEGACY_KEY];
+    if (legacy && typeof legacy === 'object') {
+        const current = extension_settings[KEY] ??= {};
+        for (const [key, value] of Object.entries(legacy)) {
+            if (['personaHistoryByAvatar', 'activeVersionByAvatar', 'personaHistory', 'activeVersionName'].includes(key) && value && typeof value === 'object') {
+                const target = current[key] ??= {};
+                for (const [id, entry] of Object.entries(value)) {
+                    if (!Object.hasOwn(target, id)) target[id] = entry;
+                }
+            } else if (!Object.hasOwn(current, key)) {
+                current[key] = value;
+            }
+        }
+        delete extension_settings[LEGACY_KEY];
+        saveSettingsDebounced();
+    }
     const data = extension_settings[KEY] ??= {};
     data.personaHistoryByAvatar ??= {};
     data.activeVersionByAvatar ??= {};
@@ -39,22 +57,41 @@ function cleanVersion(value) {
 
 function versionsFor(persona) {
     const data = settings();
-    if (!Object.hasOwn(data.personaHistoryByAvatar, persona.id)) {
-        // The old format used display names. Duplicate names cannot be mapped safely.
+    const versions = data.personaHistoryByAvatar[persona.id] ??= [];
+    const legacy = data.personaHistory?.[persona.name];
+    if (Array.isArray(legacy)) {
+        // Older releases keyed AU lists by display name. A duplicate name is ambiguous.
         const matches = Object.values(power_user.personas).filter(name => name === persona.name).length;
-        const legacy = data.personaHistory?.[persona.name];
-        if (matches === 1 && Array.isArray(legacy)) {
-            data.personaHistoryByAvatar[persona.id] = legacy.map(cleanVersion).filter(Boolean);
-            data.activeVersionByAvatar[persona.id] = data.activeVersionName?.[persona.name] ?? '';
-            delete data.personaHistory[persona.name];
-            if (data.activeVersionName) delete data.activeVersionName[persona.name];
-            saveSettingsDebounced();
-        } else {
-            data.personaHistoryByAvatar[persona.id] = [];
-            if (matches > 1 && legacy) toastr.warning('동명 페르소나의 기존 AU는 자동 이전하지 않았습니다. 기존 설정 백업을 확인해 주세요.');
+        if (matches === 1) {
+            let fullyMigrated = true;
+            let changed = false;
+            for (const item of legacy) {
+                const converted = cleanVersion(item);
+                if (!converted) { fullyMigrated = false; continue; }
+                const existing = versions.find(version => version.name === converted.name);
+                if (!existing) {
+                    versions.push(converted);
+                    changed = true;
+                } else if (existing.desc !== converted.desc || existing.overrideAvatar !== converted.overrideAvatar) {
+                    fullyMigrated = false;
+                }
+            }
+            if (!data.activeVersionByAvatar[persona.id] && data.activeVersionName?.[persona.name]) {
+                data.activeVersionByAvatar[persona.id] = data.activeVersionName[persona.name];
+                changed = true;
+            }
+            if (fullyMigrated) {
+                delete data.personaHistory[persona.name];
+                if (data.activeVersionName) delete data.activeVersionName[persona.name];
+                changed = true;
+            }
+            if (changed) saveSettingsDebounced();
+        } else if (matches > 1 && !warnedLegacyNames.has(persona.name)) {
+            warnedLegacyNames.add(persona.name);
+            toastr.warning('같은 이름의 페르소나가 여럿 있어 옛 AU를 자동 연결할 수 없습니다. 관리창에서 이전 AU JSON을 저장해 가져오세요.');
         }
     }
-    return data.personaHistoryByAvatar[persona.id];
+    return versions;
 }
 
 const activeName = id => settings().activeVersionByAvatar[id] ?? '';
@@ -67,7 +104,7 @@ function updateLauncher() {
         control = document.createElement('button');
         control.id = BUTTON_ID;
         control.type = 'button';
-        control.className = 'menu_button fa-solid fa-layer-group';
+        control.className = 'menu_button fa-solid fa-address-book interactable';
         control.setAttribute('aria-label', '페르소나 AU 관리');
         control.addEventListener('click', openManager);
         container.prepend(control);
@@ -511,7 +548,7 @@ function openManager() {
     dialog.querySelector('.ps-export-png').onclick = () => exportPng(persona);
     dialog.querySelector('.ps-export-json').onclick = () => download(new Blob([JSON.stringify({ format: 'st-persona-au-manager', version: 1, persona: { name: persona.name, description: currentPersona()?.description ?? persona.description }, versions: versionsFor(persona) }, null, 2)], { type: 'application/json' }), `${persona.name}_AU.json`);
     const legacy = settings().personaHistory?.[persona.name];
-    if (Array.isArray(legacy) && Object.values(power_user.personas).filter(name => name === persona.name).length > 1) {
+    if (Array.isArray(legacy)) {
         dialog.querySelector('footer').append(button('이전 AU JSON 저장', () => download(new Blob([JSON.stringify(legacy, null, 2)], { type: 'application/json' }), `${persona.name}_legacy_AU.json`)));
     }
     const fileInput = dialog.querySelector('.ps-import-input');
