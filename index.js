@@ -1,8 +1,10 @@
 import { extension_settings } from '../../../extensions.js';
-import { eventSource, event_types, saveSettingsDebounced } from '../../../../script.js';
+import { eventSource, event_types, getRequestHeaders, saveSettingsDebounced } from '../../../../script.js';
 import { power_user } from '../../../power-user.js';
 import { getUserAvatar, user_avatar } from '../../../personas.js';
 import { embedPersonaData, readPersonaData } from './persona-png.mjs';
+import { makeFullBackup, mergeFullBackup } from './backup.mjs';
+import { preserveRecoverySnapshot, readLegacyRecoverySnapshots, readRecoverySnapshot, readUnresolvedRecoverySnapshot, writeRecoverySnapshot } from './recovery.mjs';
 
 const KEY = 'st-persona-au-manager';
 const LEGACY_KEY = 'st-persona-switcher';
@@ -16,22 +18,116 @@ let pendingAvatarData = null;
 let appliedAvatarData = null;
 let appliedAvatarUrl = null;
 const warnedLegacyNames = new Set();
+let legacyKeyMerged = false;
+let saveGeneration = 0;
+let verifiedGeneration = 0;
+let verificationTimer;
+let verificationInFlight = false;
+let verificationPending = false;
+let recoveryWrite = Promise.resolve();
+let recoveryInitialization = Promise.resolve();
+let recoveryAccount = null;
+let recoveryWarningShown = false;
+let sizeWarningShown = false;
+let sizeCheckTimer;
+let legacyRecoveryAvailable = false;
+let browserRecoveryAvailable = false;
+
+function currentBackup() {
+    return makeFullBackup(settings(), extension_settings[LEGACY_KEY], power_user.personas);
+}
+
+function backupContent(backup) {
+    return JSON.stringify({ settings: backup.settings, legacySettings: backup.legacySettings });
+}
+
+function updateSaveState(message) {
+    const label = dialog?.querySelector('.ps-save-state');
+    if (label) label.textContent = message;
+}
+
+function journalCurrent() {
+    const snapshot = currentBackup();
+    if (!sizeWarningShown) {
+        clearTimeout(sizeCheckTimer);
+        sizeCheckTimer = setTimeout(() => {
+            if (JSON.stringify(snapshot.settings).length > 4_000_000) {
+                sizeWarningShown = true;
+                toastr.warning('AU 이미지와 설명으로 ST 설정이 커졌습니다. 전체 AU 백업을 내려받고 이미지 크기를 점검해 주세요.');
+            }
+        }, 1000);
+    }
+    recoveryWrite = recoveryWrite.catch(() => {}).then(() => recoveryInitialization).then(() => {
+        if (!recoveryAccount) throw new Error('ST account could not be identified');
+        return writeRecoverySnapshot(recoveryAccount, snapshot);
+    }).catch(error => {
+        console.warn('[Persona AU Manager] Browser recovery copy could not be saved', error);
+        if (!recoveryWarningShown) {
+            recoveryWarningShown = true;
+            toastr.warning('브라우저 복구본을 저장하지 못했습니다. 전체 AU 백업을 내려받아 주세요.');
+        }
+    });
+}
+
+function queueSave() {
+    saveGeneration++;
+    saveSettingsDebounced();
+    journalCurrent();
+    updateSaveState('서버 저장 대기 중 · 브라우저 복구본 기록 중');
+    clearTimeout(verificationTimer);
+    verificationTimer = setTimeout(verifyServerSave, 1800);
+}
+
+async function verifyServerSave() {
+    if (saveGeneration === verifiedGeneration) return;
+    if (verificationInFlight) { verificationPending = true; return; }
+    verificationInFlight = true;
+    const generation = saveGeneration;
+    try {
+        const response = await fetch('/api/settings/get', { method: 'POST', headers: getRequestHeaders() });
+        if (!response.ok) throw new Error(`Settings readback: ${response.status}`);
+        const payload = await response.json();
+        const server = JSON.parse(payload.settings);
+        if (generation !== saveGeneration) return;
+        const descriptionMatches = !currentPersona() || server.power_user?.persona_descriptions?.[user_avatar]?.description === currentPersona().description;
+        const auMatches = JSON.stringify(server.extension_settings?.[KEY] ?? {}) === JSON.stringify(settings());
+        const legacyMatches = JSON.stringify(server.extension_settings?.[LEGACY_KEY] ?? null) === JSON.stringify(extension_settings[LEGACY_KEY] ?? null);
+        if (auMatches && legacyMatches && descriptionMatches) {
+            verifiedGeneration = generation;
+            updateSaveState('서버 저장 확인됨');
+        } else {
+            updateSaveState('서버 저장 확인 필요 · 전체 AU 백업 권장');
+        }
+    } catch (error) {
+        console.warn('[Persona AU Manager] Could not verify server save', error);
+        if (generation === saveGeneration) updateSaveState('서버 연결 확인 필요 · 전체 AU 백업 권장');
+    } finally {
+        verificationInFlight = false;
+        if (verificationPending || generation !== saveGeneration) {
+            verificationPending = false;
+            clearTimeout(verificationTimer);
+            verificationTimer = setTimeout(verifyServerSave, 300);
+        }
+    }
+}
 
 function settings() {
     const legacy = extension_settings[LEGACY_KEY];
-    if (legacy && typeof legacy === 'object') {
+    if (!legacyKeyMerged && legacy && typeof legacy === 'object') {
         const current = extension_settings[KEY] ??= {};
         for (const [key, value] of Object.entries(legacy)) {
             if (['personaHistoryByAvatar', 'activeVersionByAvatar', 'personaHistory', 'activeVersionName'].includes(key) && value && typeof value === 'object') {
                 const target = current[key] ??= {};
                 for (const [id, entry] of Object.entries(value)) {
-                    if (!Object.hasOwn(target, id)) target[id] = entry;
+                    if (!Object.hasOwn(target, id)) target[id] = entry && typeof entry === 'object' ? JSON.parse(JSON.stringify(entry)) : entry;
                 }
             } else if (!Object.hasOwn(current, key)) {
-                current[key] = value;
+                current[key] = value && typeof value === 'object' ? JSON.parse(JSON.stringify(value)) : value;
             }
         }
-        delete extension_settings[LEGACY_KEY];
+        // Keep the old key as a recovery copy for users updating from older releases.
+        // Existing values under KEY always take precedence.
+        legacyKeyMerged = true;
         saveSettingsDebounced();
     }
     const data = extension_settings[KEY] ??= {};
@@ -59,7 +155,7 @@ function versionsFor(persona) {
     const data = settings();
     const versions = data.personaHistoryByAvatar[persona.id] ??= [];
     const legacy = data.personaHistory?.[persona.name];
-    if (Array.isArray(legacy)) {
+    if (Array.isArray(legacy) && !data.migratedLegacyByAvatar?.[persona.id]) {
         // Older releases keyed AU lists by display name. A duplicate name is ambiguous.
         const matches = Object.values(power_user.personas).filter(name => name === persona.name).length;
         if (matches === 1) {
@@ -80,15 +176,15 @@ function versionsFor(persona) {
                 data.activeVersionByAvatar[persona.id] = data.activeVersionName[persona.name];
                 changed = true;
             }
-            if (fullyMigrated) {
-                delete data.personaHistory[persona.name];
-                if (data.activeVersionName) delete data.activeVersionName[persona.name];
-                changed = true;
-            }
-            if (changed) saveSettingsDebounced();
+            // Retain name-keyed data as a recovery copy. Mark even a partial
+            // migration so a deliberately deleted AU cannot reappear later.
+            (data.migratedLegacyByAvatar ??= {})[persona.id] = true;
+            changed = true;
+            if (!fullyMigrated) toastr.warning('일부 이전 AU가 현재 데이터와 다르거나 형식이 맞지 않습니다. 이전 원본은 설정에 보관되어 있습니다.');
+            if (changed) queueSave();
         } else if (matches > 1 && !warnedLegacyNames.has(persona.name)) {
             warnedLegacyNames.add(persona.name);
-            toastr.warning('같은 이름의 페르소나가 여럿 있어 옛 AU를 자동 연결할 수 없습니다. 관리창에서 이전 AU JSON을 저장해 가져오세요.');
+            toastr.warning('같은 이름의 페르소나가 여럿 있어 이전 AU를 자동 연결하지 않았습니다. AU 관리창에서 직접 가져올 수 있습니다.');
         }
     }
     return versions;
@@ -222,7 +318,7 @@ async function refreshAvatar() {
     const persona = currentPersona();
     const version = persona && versionsFor(persona).find(v => v.name === activeName(persona.id));
     const data = version?.overrideAvatar ?? null;
-    if (data === pendingAvatarData) return;
+    if (data !== null && data === pendingAvatarData) return;
     if (data === appliedAvatarData && pendingAvatarData === null) return;
     const request = ++avatarRequest;
     pendingAvatarData = data;
@@ -299,36 +395,121 @@ function formatDate(value) {
     return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString();
 }
 
-function renderManager(persona, selectedName = '') {
+function hasUnsavedDraft(modal = dialog) {
+    const edit = modal?.editorState;
+    const edited = edit && (edit.nameInput.value.trim() !== edit.selected.name || edit.descInput.value !== edit.selected.desc);
+    return Boolean(edited || modal?.querySelector('.ps-new-name')?.value.trim() || modal?.querySelector('.ps-new-desc')?.value);
+}
+
+function saveUnsavedDraft(modal) {
+    const edit = modal.editorState;
+    if (edit && (edit.nameInput.value.trim() !== edit.selected.name || edit.descInput.value !== edit.selected.desc) && !edit.save()) return false;
+    if ((modal.querySelector('.ps-new-name')?.value.trim() || modal.querySelector('.ps-new-desc')?.value) && !modal.createAU()) return false;
+    return true;
+}
+
+function discardUnsavedDraft(modal) {
+    const edit = modal.editorState;
+    if (edit) {
+        edit.nameInput.value = edit.selected.name;
+        edit.descInput.value = edit.selected.desc;
+    }
+    const newName = modal.querySelector('.ps-new-name');
+    if (newName) newName.value = '';
+    const newDesc = modal.querySelector('.ps-new-desc');
+    if (newDesc) newDesc.value = '';
+}
+
+function askUnsavedDraft() {
+    return new Promise(resolve => {
+        const promptDialog = document.createElement('dialog');
+        promptDialog.className = 'ps-crop-dialog ps-unsaved-dialog';
+        keepPersonaDrawerOpen(promptDialog);
+        const message = document.createElement('p');
+        message.textContent = '저장하지 않은 AU 이름 또는 설명이 있습니다.';
+        const actions = document.createElement('div');
+        actions.className = 'ps-actions';
+        const finish = choice => { promptDialog.close(); promptDialog.remove(); resolve(choice); };
+        actions.append(
+            button('AU 저장', () => finish('save'), 'ps-primary'),
+            button('버리기', () => finish('discard')),
+            button('계속 편집', () => finish('cancel')),
+        );
+        promptDialog.append(message, actions);
+        promptDialog.addEventListener('cancel', event => { event.preventDefault(); finish('cancel'); });
+        document.body.append(promptDialog);
+        promptDialog.showModal();
+    });
+}
+
+async function withUnsavedDraft(action, modal = dialog) {
+    if (!modal?.open || modal.draftPromptOpen) return;
+    modal.draftPromptOpen = true;
+    try {
+        if (hasUnsavedDraft(modal)) {
+            const choice = await askUnsavedDraft();
+            if (choice === 'cancel' || !modal.open) return;
+            if (choice === 'save' && !saveUnsavedDraft(modal)) return;
+            if (choice === 'discard') discardUnsavedDraft(modal);
+        }
+        if (modal.open) action();
+    } finally {
+        modal.draftPromptOpen = false;
+    }
+}
+
+function requestManagerClose(modal = dialog) {
+    return withUnsavedDraft(() => modal.close(), modal);
+}
+
+function renderManager(persona, selectedName = '', createNew = false) {
     if (!dialog?.isConnected) return;
+    if (user_avatar !== persona.id) { dialog.close(); return; }
     updateQuickSwitch();
     const list = dialog.querySelector('.ps-list');
     const editor = dialog.querySelector('.ps-editor');
     const versions = versionsFor(persona);
-    const selected = versions.find(v => v.name === selectedName) ?? null;
+    dialog.querySelector('.ps-list-count').textContent = `${versions.length}개`;
+    const selected = createNew ? null : versions.find(v => v.name === selectedName) ?? null;
+    dialog.creatingAU = createNew;
+    dialog.editorState = null;
     list.replaceChildren();
     editor.replaceChildren();
     if (!versions.length) {
         const empty = document.createElement('p');
         empty.className = 'ps-muted';
-        empty.textContent = '아직 AU가 없습니다. 아래에서 이름을 입력해 현재 설명을 저장하세요.';
+        empty.textContent = '아직 AU가 없습니다. 목록 옆 + 버튼으로 만들어 보세요.';
         list.append(empty);
     }
     for (const version of versions) {
         const row = document.createElement('div');
         row.className = `ps-item${version === selected ? ' ps-selected' : ''}`;
-        const select = button(version.name, () => renderManager(persona, version.name), 'ps-item-select');
+        const select = button(version.name, () => withUnsavedDraft(() => renderManager(persona, version.name)), 'ps-item-select');
         select.title = version.desc.slice(0, 200) || '설명 없음';
         const meta = document.createElement('span');
         meta.className = 'ps-item-meta';
         const applied = version.name === activeName(persona.id);
         meta.textContent = `${applied ? (currentPersona()?.description === version.desc ? '적용 중 · ' : '적용 후 수정됨 · ') : ''}${version.overrideAvatar ? '이미지 · ' : ''}${formatDate(version.date)}`;
-        row.append(select, meta, button('적용', () => applyVersion(persona, version), 'ps-compact'));
+        row.append(select, meta, button('적용', () => withUnsavedDraft(() => applyVersion(persona, version)), 'ps-compact'));
         list.append(row);
     }
-    if (!selected) return;
+    if (createNew) {
+        editor.innerHTML = `<div class="ps-editor-head"><h4>새 AU</h4></div>
+            <label>이름<input class="text_pole ps-new-name" maxlength="120" placeholder="AU 이름"></label>
+            <label>설명<textarea class="text_pole ps-new-desc" rows="6" placeholder="새 설명을 입력하세요"></textarea></label>
+            <div class="ps-editor-foot"><button type="button" class="ps-button ps-create-cancel">취소</button><button type="button" class="ps-button ps-primary ps-create-button">AU 만들기</button></div>`;
+        editor.querySelector('.ps-create-cancel').onclick = () => renderManager(persona, dialog.returnToName);
+        editor.querySelector('.ps-create-button').onclick = () => dialog.createAU();
+        editor.querySelector('.ps-new-name').onkeydown = event => { if (event.key === 'Enter') dialog.createAU(); };
+        editor.querySelector('.ps-new-name').focus();
+        renderRecoveryOptions(persona);
+        return;
+    }
+    if (!selected) { renderRecoveryOptions(persona); return; }
+    const editorHead = document.createElement('div');
+    editorHead.className = 'ps-editor-head';
     const heading = document.createElement('h4');
-    heading.textContent = 'AU 수정';
+    heading.textContent = 'AU 편집';
     const nameLabel = document.createElement('label');
     nameLabel.textContent = '이름';
     const nameInput = document.createElement('input');
@@ -343,48 +524,80 @@ function renderManager(persona, selectedName = '') {
     descInput.rows = 6;
     descInput.value = selected.desc;
     descLabel.append(descInput);
-    const actions = document.createElement('div');
-    actions.className = 'ps-actions';
-    actions.append(
-        button('수정 저장', () => {
-            const nextName = nameInput.value.trim();
-            if (!nextName) return toastr.warning('AU 이름을 입력하세요.');
-            if (versions.some(v => v !== selected && v.name === nextName)) return toastr.warning('같은 이름의 AU가 있습니다.');
-            const oldName = selected.name;
-            selected.name = nextName;
-            selected.desc = descInput.value;
-            selected.date = new Date().toISOString();
-            if (activeName(persona.id) === oldName) settings().activeVersionByAvatar[persona.id] = nextName;
-            saveSettingsDebounced();
-            updateLauncher();
-            renderManager(persona, nextName);
-            toastr.success('AU를 저장했습니다.');
-        }, 'ps-primary'),
-        button('현재 설명으로 갱신', () => {
-            if (!confirm(`현재 페르소나 설명으로 '${selected.name}' AU를 갱신할까요?`)) return;
-            selected.desc = currentPersona()?.description ?? '';
-            selected.date = new Date().toISOString();
-            saveSettingsDebounced();
-            renderManager(persona, selected.name);
-        }),
-        button('이미지 변경', () => chooseImage(selected, () => renderManager(persona, selected.name))),
-        button('이미지 제거', () => {
+    const editorFoot = document.createElement('div');
+    editorFoot.className = 'ps-editor-foot';
+    const saveSelected = () => {
+        if (user_avatar !== persona.id) { toastr.warning('페르소나가 변경되었습니다. AU 관리창을 다시 열어 주세요.'); return false; }
+        const nextName = nameInput.value.trim();
+        if (!nextName) { toastr.warning('AU 이름을 입력하세요.'); return false; }
+        if (versions.some(v => v !== selected && v.name === nextName)) { toastr.warning('같은 이름의 AU가 있습니다.'); return false; }
+        if (selected.name === nextName && selected.desc === descInput.value) {
+            toastr.info('변경 사항이 없습니다.');
+            return true;
+        }
+        const oldName = selected.name;
+        const wasActive = activeName(persona.id) === oldName;
+        const field = wasActive ? document.getElementById('persona_description') : null;
+        if (wasActive && !field) { toastr.error('ST 페르소나 설명 입력란을 찾지 못했습니다.'); return false; }
+        selected.name = nextName;
+        selected.desc = descInput.value;
+        selected.date = new Date().toISOString();
+        if (wasActive) {
+            settings().activeVersionByAvatar[persona.id] = nextName;
+            if (field.value !== selected.desc || currentPersona()?.description !== selected.desc) {
+                field.value = selected.desc;
+                field.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+        }
+        queueSave();
+        renderManager(persona, nextName);
+        toastr.info('AU 변경을 반영했습니다. 서버 저장 상태를 확인해 주세요.');
+        return true;
+    };
+    dialog.editorState = { selected, nameInput, descInput, save: saveSelected };
+    const imageRow = document.createElement('div');
+    imageRow.className = 'ps-image-row';
+    const imageInfo = document.createElement('div');
+    imageInfo.className = 'ps-image-info';
+    const imagePreview = document.createElement('span');
+    imagePreview.className = 'ps-image-preview';
+    if (selected.overrideAvatar) {
+        const image = document.createElement('img');
+        image.src = selected.overrideAvatar;
+        image.alt = '';
+        imagePreview.append(image);
+    } else imagePreview.innerHTML = '<i class="fa-solid fa-image" aria-hidden="true"></i>';
+    const imageText = document.createElement('span');
+    imageText.textContent = selected.overrideAvatar ? 'AU 이미지' : '이미지 없음';
+    imageInfo.append(imagePreview, imageText);
+    const imageActions = document.createElement('div');
+    imageActions.className = 'ps-image-actions';
+    imageActions.append(button(selected.overrideAvatar ? '변경' : '추가', () => withUnsavedDraft(() => chooseImage(selected, () => renderManager(persona, selected.name))), 'ps-subtle'));
+    if (selected.overrideAvatar) imageActions.append(button('제거', () => withUnsavedDraft(() => {
+            if (user_avatar !== persona.id) return toastr.warning('페르소나가 변경되었습니다. AU 관리창을 다시 열어 주세요.');
             selected.overrideAvatar = null;
-            saveSettingsDebounced();
+            queueSave();
             refreshAvatar();
             renderManager(persona, selected.name);
-        }),
-        button('삭제', () => {
+        }), 'ps-subtle'));
+    imageRow.append(imageInfo, imageActions);
+    const deleteButton = button('', () => withUnsavedDraft(() => {
+            if (user_avatar !== persona.id) return toastr.warning('페르소나가 변경되었습니다. AU 관리창을 다시 열어 주세요.');
             if (!confirm(`'${selected.name}' AU를 삭제할까요?`)) return;
             versions.splice(versions.indexOf(selected), 1);
             if (activeName(persona.id) === selected.name) settings().activeVersionByAvatar[persona.id] = '';
-            saveSettingsDebounced();
+            queueSave();
             refreshAvatar();
             updateLauncher();
             renderManager(persona);
-        }, 'ps-danger'),
-    );
-    editor.append(heading, nameLabel, descLabel, actions);
+        }), 'ps-icon ps-danger');
+    deleteButton.innerHTML = '<i class="fa-solid fa-trash" aria-hidden="true"></i>';
+    deleteButton.setAttribute('aria-label', '이 AU 삭제');
+    deleteButton.title = '이 AU 삭제';
+    editorHead.append(heading, deleteButton);
+    editorFoot.append(button('저장', saveSelected, 'ps-primary'));
+    editor.append(editorHead, nameLabel, descLabel, imageRow, editorFoot);
+    renderRecoveryOptions(persona);
 }
 
 function applyVersion(persona, version) {
@@ -392,14 +605,18 @@ function applyVersion(persona, version) {
     const field = document.getElementById('persona_description');
     if (!field) return toastr.error('ST 페르소나 설명 입력란을 찾지 못했습니다.');
     const descriptionChanged = field.value !== version.desc || currentPersona()?.description !== version.desc;
+    const activeChanged = activeName(persona.id) !== version.name;
+    if (!activeChanged && !descriptionChanged) {
+        if (dialog?.open && dialog.editorState?.selected !== version) renderManager(persona, version.name);
+        return;
+    }
     settings().activeVersionByAvatar[persona.id] = version.name;
     if (descriptionChanged) {
         field.value = version.desc;
         field.dispatchEvent(new Event('input', { bubbles: true })); // ST updates its descriptor and schedules one save.
-    } else {
-        saveSettingsDebounced();
     }
-    refreshAvatar();
+    queueSave();
+    if (activeChanged) refreshAvatar();
     updateLauncher();
     renderManager(persona, version.name);
     toastr.success(`'${version.name}' AU를 적용했습니다.`);
@@ -442,11 +659,18 @@ function chooseImage(version, done) {
             };
             preview.onpointerup = preview.onpointercancel = () => { pointer = null; };
             crop.querySelector('.ps-crop-save').onclick = () => {
+                if (!dialog?.open || !dialog.persona || user_avatar !== dialog.persona.id ||
+                    !settings().personaHistoryByAvatar[user_avatar]?.includes(version)) {
+                    crop.close();
+                    return toastr.warning('페르소나가 변경되었습니다. 이미지를 다시 선택해 주세요.');
+                }
                 const canvas = document.createElement('canvas');
                 canvas.width = canvas.height = 400;
                 draw(canvas.getContext('2d'), 400);
-                version.overrideAvatar = canvas.toDataURL('image/webp', 0.85);
-                saveSettingsDebounced();
+                const imageData = canvas.toDataURL('image/webp', 0.85);
+                if (imageData.length > 1_350_000 && !confirm('이미지가 약 1MB 이상입니다. ST 설정 저장이 느려질 수 있습니다. 계속 저장할까요?')) return;
+                version.overrideAvatar = imageData;
+                queueSave();
                 refreshAvatar();
                 crop.close();
                 done();
@@ -470,6 +694,86 @@ function download(blob, name) {
     anchor.click();
     anchor.remove();
     setTimeout(() => URL.revokeObjectURL(url), 30_000);
+}
+
+function exportFullBackup() {
+    const backup = currentBackup();
+    download(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }), `persona_AU_full_${new Date().toISOString().slice(0, 10)}.json`);
+}
+
+function restoreFullBackup(backup) {
+    const result = mergeFullBackup(settings(), extension_settings[LEGACY_KEY], backup, power_user.personas);
+    const { added, duplicates, conflicts, orphanAvatars, legacyEntries } = result.stats;
+    if (!confirm(`전체 AU 백업을 병합할까요?\n새 AU ${added}개, 같은 이름 충돌 ${conflicts}개, 중복 ${duplicates}개, 현재 없는 페르소나 ID ${orphanAvatars}개, 이전 설정 ${legacyEntries}항목.\n기존 AU와 설명은 덮어쓰지 않습니다.`)) return;
+    if (added || legacyEntries || JSON.stringify(result.settings) !== JSON.stringify(settings())) {
+        extension_settings[KEY] = result.settings;
+        if (legacyEntries) extension_settings[LEGACY_KEY] = result.legacySettings;
+        queueSave();
+        updateLauncher();
+        refreshAvatar();
+        if (dialog?.open) renderManager(dialog.persona);
+    }
+    toastr.info(`새 AU ${added}개를 추가했습니다. 같은 이름 충돌 ${conflicts}개는 유지했습니다.`);
+}
+
+async function importFullBackup(file) {
+    try {
+        if (file.size > 100 * 1024 * 1024) throw new Error('전체 백업은 100MB 이하여야 합니다.');
+        restoreFullBackup(JSON.parse(await file.text()));
+    } catch (error) { notifyError(error, '전체 AU 백업을 읽지 못했습니다.'); }
+}
+
+async function restoreBrowserBackup() {
+    try {
+        await recoveryInitialization;
+        if (!recoveryAccount) return toastr.warning('ST 계정을 확인할 수 없어 브라우저 복구본을 사용할 수 없습니다.');
+        const unresolved = await readUnresolvedRecoverySnapshot(recoveryAccount);
+        const latest = await readRecoverySnapshot(recoveryAccount);
+        let backup = unresolved ?? latest;
+        if (unresolved && latest && backupContent(unresolved) !== backupContent(latest)) {
+            const choice = prompt('브라우저 복구본 선택: 1 = 이전에 발견된 불일치 복구본, 2 = 가장 최근 작업 복구본');
+            if (choice === '2') backup = latest;
+            else if (choice !== '1') return;
+        }
+        if (!backup) return toastr.info('이 브라우저에 AU 복구본이 없습니다.');
+        restoreFullBackup(backup);
+    } catch (error) { notifyError(error, '브라우저 복구본을 읽지 못했습니다.'); }
+}
+
+async function exportLegacyBrowserBackup() {
+    try {
+        const { latest, unresolved } = await readLegacyRecoverySnapshots();
+        if (!latest && !unresolved) return toastr.info('구버전 브라우저 복구본이 없습니다.');
+        let backup = unresolved ?? latest;
+        if (latest && unresolved && backupContent(latest) !== backupContent(unresolved)) {
+            const choice = prompt('구버전 복구본 선택: 1 = 이전에 발견된 불일치 복구본, 2 = 가장 최근 작업 복구본');
+            if (choice === '2') backup = latest;
+            else if (choice !== '1') return;
+        }
+        if (!confirm('구버전 브라우저 복구본은 ST 계정을 구분하지 않았습니다. 다른 계정의 AU일 수 있습니다. JSON으로 내려받아 확인할까요?')) return;
+        download(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }), 'persona_AU_legacy_browser_recovery.json');
+    } catch (error) { notifyError(error, '구버전 브라우저 복구본을 내려받지 못했습니다.'); }
+}
+
+function importOrphanAu(persona) {
+    if (user_avatar !== persona.id) return toastr.warning('페르소나가 변경되었습니다. AU 관리창을 다시 열어 주세요.');
+    const records = Object.entries(settings().personaHistoryByAvatar)
+        .filter(([id, versions]) => !Object.hasOwn(power_user.personas, id) && Array.isArray(versions) && versions.length);
+    if (!records.length) return toastr.info('보관된 페르소나의 AU가 없습니다.');
+    const choices = records.map(([id, versions], index) => `${index + 1}. ${settings().archivedPersonaNamesByAvatar?.[id] ?? id} (${versions.length}개)`);
+    const choice = Number(prompt(`현재 '${persona.name}'에 가져올 보관 AU를 선택하세요.\n${choices.join('\n')}`));
+    if (!Number.isInteger(choice) || choice < 1 || choice > records.length) return;
+    const [id, source] = records[choice - 1];
+    if (!confirm(`보관된 '${settings().archivedPersonaNamesByAvatar?.[id] ?? id}'의 AU를 '${persona.name}'에 추가할까요? 같은 이름은 건너뜁니다.`)) return;
+    const target = versionsFor(persona);
+    const names = new Set(target.map(v => v.name));
+    let added = 0;
+    for (const item of source) {
+        const version = cleanVersion(item);
+        if (version && !names.has(version.name)) { target.push(version); names.add(version.name); added++; }
+    }
+    if (added) { queueSave(); renderManager(persona); }
+    toastr.info(`${added}개 AU를 추가했습니다.`);
 }
 
 async function exportPng(persona) {
@@ -498,6 +802,7 @@ async function importFile(persona, file) {
         const source = Array.isArray(payload) ? payload : payload?.versions;
         if (!Array.isArray(source)) throw new Error('지원하지 않는 AU 데이터입니다.');
         if (source.length > 500) throw new Error('AU 500개를 초과하는 파일은 가져올 수 없습니다.');
+        if (user_avatar !== persona.id) return toastr.warning('페르소나가 변경되었습니다. 파일을 다시 가져와 주세요.');
         if (payload?.persona?.name && payload.persona.name !== persona.name && !confirm(`파일의 페르소나 '${payload.persona.name}'과 현재 '${persona.name}'이 다릅니다. AU를 현재 페르소나에 가져올까요?`)) return;
         const target = versionsFor(persona);
         const names = new Set(target.map(v => v.name));
@@ -506,18 +811,80 @@ async function importFile(persona, file) {
             const version = cleanVersion(item);
             if (version && !names.has(version.name)) { target.push(version); names.add(version.name); added++; }
         }
-        if (added) saveSettingsDebounced();
+        if (added) queueSave();
         if (typeof payload?.persona?.description === 'string' && payload.persona.description !== currentPersona()?.description
             && confirm('파일의 기본 페르소나 설명도 현재 페르소나에 적용할까요?')) {
             const field = document.getElementById('persona_description');
             if (field && user_avatar === persona.id) {
                 field.value = payload.persona.description;
                 field.dispatchEvent(new Event('input', { bubbles: true }));
+                queueSave();
             }
         }
         renderManager(persona);
         toastr.info(`${added}개 AU를 추가했습니다. 중복 이름은 건너뛰었습니다.`);
     } catch (error) { notifyError(error, 'AU 파일을 읽지 못했습니다. 이 확장의 PNG 또는 JSON 백업인지 확인해 주세요.'); }
+}
+
+function importLegacyAu(persona) {
+    const legacy = settings().personaHistory?.[persona.name];
+    if (!Array.isArray(legacy)) return;
+    if (!confirm(`이전 이름별 AU를 '${persona.name}'에 추가할까요? 이름이 같은 다른 내용은 '(이전)'을 붙여 보존하고 기존 AU는 유지합니다.`)) return;
+    const target = versionsFor(persona);
+    const names = new Set(target.map(item => item.name));
+    let added = 0;
+    for (const item of legacy) {
+        const version = cleanVersion(item);
+        if (!version || target.some(current => current.desc === version.desc && current.overrideAvatar === version.overrideAvatar)) continue;
+        if (names.has(version.name)) {
+            const base = version.name.slice(0, 108);
+            let candidate = `${base} (이전)`;
+            for (let index = 2; names.has(candidate); index++) candidate = `${base} (이전 ${index})`;
+            version.name = candidate;
+        }
+        target.push(version);
+        names.add(version.name);
+        added++;
+    }
+    if (added) { queueSave(); renderManager(persona); }
+    toastr.info(`${added}개 이전 AU를 추가했습니다.`);
+}
+
+function renderRecoveryOptions(persona) {
+    const area = dialog?.querySelector('.ps-recovery');
+    if (!area) return;
+    area.replaceChildren();
+    const addNotice = (message, label, action) => {
+        const row = document.createElement('div');
+        row.className = 'ps-recovery-row';
+        const copy = document.createElement('span');
+        copy.textContent = message;
+        row.append(copy, button(label, () => withUnsavedDraft(action), 'ps-subtle'));
+        area.append(row);
+    };
+    const legacy = settings().personaHistory?.[persona.name];
+    const versions = settings().personaHistoryByAvatar[persona.id] ?? [];
+    if (Array.isArray(legacy) && legacy.some(item => {
+        if (versions.some(current => current.desc === item?.desc && current.overrideAvatar === (item?.overrideAvatar ?? null))) return false;
+        const version = cleanVersion(item);
+        return version && !versions.some(current => current.desc === version.desc && current.overrideAvatar === version.overrideAvatar);
+    })) addNotice('연결되지 않은 이전 AU가 있습니다.', '가져오기', () => importLegacyAu(persona));
+    const orphans = Object.entries(settings().personaHistoryByAvatar).some(([id, items]) => !Object.hasOwn(power_user.personas, id) && Array.isArray(items) && items.length);
+    if (orphans) addNotice('삭제된 페르소나의 AU가 보관되어 있습니다.', '가져오기', () => importOrphanAu(persona));
+    if (browserRecoveryAvailable) addNotice('서버 설정과 다른 브라우저 AU 기록이 있습니다.', '복원 검토', restoreBrowserBackup);
+    if (legacyRecoveryAvailable) addNotice('이전 버전의 브라우저 기록이 있습니다.', '파일 확인', exportLegacyBrowserBackup);
+    area.hidden = !area.childElementCount;
+}
+
+async function importManagerFile(persona, file) {
+    if (file.name.toLowerCase().endsWith('.json')) {
+        try {
+            if (file.size > 100 * 1024 * 1024) throw new Error('백업 파일은 100MB 이하여야 합니다.');
+            const payload = JSON.parse(await file.text());
+            if (payload?.format === 'st-persona-au-manager-full-backup') return restoreFullBackup(payload);
+        } catch (error) { return notifyError(error, 'JSON 파일을 읽지 못했습니다.'); }
+    }
+    return importFile(persona, file);
 }
 
 function openManager() {
@@ -530,30 +897,51 @@ function openManager() {
     modal.persona = persona;
     dialog.className = 'ps-dialog';
     keepPersonaDrawerOpen(dialog);
-    dialog.innerHTML = '<div class="ps-wrapper"><header><div><h3>페르소나 AU</h3><p class="ps-persona-name"></p></div><button type="button" class="ps-button ps-close" aria-label="닫기">×</button></header><div class="ps-list"></div><section class="ps-editor"></section><div class="ps-create"><input class="text_pole ps-new-name" maxlength="120" placeholder="새 AU 이름"><button type="button" class="ps-button ps-create-button">현재 설명으로 AU 만들기</button></div><footer><button type="button" class="ps-button ps-export-png">PNG 내보내기</button><button type="button" class="ps-button ps-import">PNG / JSON 가져오기</button><button type="button" class="ps-button ps-export-json">JSON 백업</button><input class="ps-import-input" type="file" accept=".png,.json,image/png,application/json" hidden></footer><p class="ps-muted">PNG는 이 확장의 메타데이터 형식입니다. ST의 기본 캐릭터·페르소나 가져오기는 AU를 읽지 않습니다.</p></div>';
+    dialog.innerHTML = `<div class="ps-wrapper">
+        <header class="ps-header"><div><h3>페르소나 AU</h3><p class="ps-persona-name"></p></div>
+            <div class="ps-header-tools"><details class="ps-file-menu"><summary>파일 <i class="fa-solid fa-chevron-down" aria-hidden="true"></i></summary>
+                <div class="ps-file-options"><button type="button" class="ps-import">가져오기</button><button type="button" class="ps-export-png">AU PNG 내보내기</button><button type="button" class="ps-export-full">전체 AU 백업</button></div>
+            </details><button type="button" class="ps-button ps-icon ps-close" aria-label="닫기" title="닫기"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button></div>
+        </header>
+        <section class="ps-list-section"><div class="ps-section-head"><h4>현재 AU 목록</h4><div class="ps-list-tools"><span class="ps-list-count"></span><button type="button" class="ps-button ps-icon ps-add" aria-label="새 AU 만들기" title="새 AU 만들기"><i class="fa-solid fa-plus" aria-hidden="true"></i></button></div></div><div class="ps-list"></div></section>
+        <section class="ps-editor"></section>
+        <section class="ps-recovery" aria-label="복구 가능한 AU" hidden></section>
+        <div class="ps-bottom"><span class="ps-save-state" role="status"></span></div>
+        <input class="ps-import-input" type="file" accept=".png,.json,image/png,application/json" hidden>
+    </div>`;
     dialog.querySelector('.ps-persona-name').textContent = persona.name;
-    dialog.querySelector('.ps-close').onclick = () => dialog.close();
-    dialog.querySelector('.ps-create-button').onclick = () => {
-        const input = dialog.querySelector('.ps-new-name');
-        const name = input.value.trim();
-        if (!name) return toastr.warning('새 AU 이름을 입력하세요.');
-        const versions = versionsFor(persona);
-        if (versions.some(v => v.name === name)) return toastr.warning('같은 이름의 AU가 있습니다. 목록에서 선택해 수정하세요.');
-        versions.push({ name, desc: currentPersona()?.description ?? '', date: new Date().toISOString(), overrideAvatar: null });
-        input.value = '';
-        saveSettingsDebounced();
-        renderManager(persona, name);
+    dialog.addEventListener('click', event => {
+        const menu = dialog.querySelector('.ps-file-menu');
+        if (menu.open && !menu.contains(event.target)) menu.open = false;
+    });
+    dialog.querySelector('.ps-close').onclick = () => requestManagerClose(modal);
+    dialog.addEventListener('cancel', event => { event.preventDefault(); requestManagerClose(modal); });
+    dialog.querySelector('.ps-add').onclick = () => {
+        if (dialog.creatingAU) return dialog.querySelector('.ps-new-name')?.focus();
+        withUnsavedDraft(() => {
+            dialog.returnToName = dialog.editorState?.selected.name || activeName(persona.id) || versionsFor(persona)[0]?.name || '';
+            renderManager(persona, '', true);
+        });
     };
-    dialog.querySelector('.ps-new-name').onkeydown = event => { if (event.key === 'Enter') dialog.querySelector('.ps-create-button').click(); };
-    dialog.querySelector('.ps-export-png').onclick = () => exportPng(persona);
-    dialog.querySelector('.ps-export-json').onclick = () => download(new Blob([JSON.stringify({ format: 'st-persona-au-manager', version: 1, persona: { name: persona.name, description: currentPersona()?.description ?? persona.description }, versions: versionsFor(persona) }, null, 2)], { type: 'application/json' }), `${persona.name}_AU.json`);
-    const legacy = settings().personaHistory?.[persona.name];
-    if (Array.isArray(legacy)) {
-        dialog.querySelector('footer').append(button('이전 AU JSON 저장', () => download(new Blob([JSON.stringify(legacy, null, 2)], { type: 'application/json' }), `${persona.name}_legacy_AU.json`)));
-    }
+    modal.createAU = () => {
+        if (user_avatar !== persona.id) { toastr.warning('페르소나가 변경되었습니다. AU 관리창을 다시 열어 주세요.'); return false; }
+        const input = dialog.querySelector('.ps-new-name');
+        const description = dialog.querySelector('.ps-new-desc');
+        const name = input.value.trim();
+        if (!name) { toastr.warning('새 AU 이름을 입력하세요.'); return false; }
+        const versions = versionsFor(persona);
+        if (versions.some(v => v.name === name)) { toastr.warning('같은 이름의 AU가 있습니다. 목록에서 선택해 수정하세요.'); return false; }
+        versions.push({ name, desc: description.value, date: new Date().toISOString(), overrideAvatar: null });
+        queueSave();
+        renderManager(persona, name);
+        return true;
+    };
+    dialog.querySelector('.ps-export-png').onclick = () => withUnsavedDraft(() => { dialog.querySelector('.ps-file-menu').open = false; exportPng(persona); });
+    dialog.querySelector('.ps-export-full').onclick = () => withUnsavedDraft(() => { dialog.querySelector('.ps-file-menu').open = false; exportFullBackup(); });
+    dialog.querySelector('.ps-save-state').textContent = saveGeneration === verifiedGeneration ? 'AU 변경 없음' : '서버 저장 확인 필요';
     const fileInput = dialog.querySelector('.ps-import-input');
-    dialog.querySelector('.ps-import').onclick = () => fileInput.click();
-    fileInput.onchange = async () => { const file = fileInput.files?.[0]; if (file) await importFile(persona, file); fileInput.value = ''; };
+    dialog.querySelector('.ps-import').onclick = () => withUnsavedDraft(() => { dialog.querySelector('.ps-file-menu').open = false; fileInput.click(); });
+    fileInput.onchange = async () => { const file = fileInput.files?.[0]; if (file) await importManagerFile(persona, file); fileInput.value = ''; };
     dialog.addEventListener('close', () => { modal.remove(); if (dialog === modal) dialog = null; });
     document.body.append(dialog);
     dialog.showModal();
@@ -561,37 +949,45 @@ function openManager() {
 }
 
 settings();
+recoveryInitialization = fetch('/api/users/me').then(async response => {
+    if (!response.ok) throw new Error(`Account lookup: ${response.status}`);
+    const user = await response.json();
+    if (!user?.handle || typeof user.handle !== 'string') throw new Error('Account handle missing');
+    recoveryAccount = user.handle;
+    const [backup, legacy] = await Promise.all([readRecoverySnapshot(recoveryAccount), readLegacyRecoverySnapshots()]);
+    legacyRecoveryAvailable = [legacy.latest, legacy.unresolved].some(item => item && backupContent(item) !== backupContent(currentBackup()));
+    if (dialog?.open) renderRecoveryOptions(dialog.persona);
+    return backup;
+}).then(backup => {
+    if (!backup) journalCurrent();
+    else if (backupContent(backup) !== backupContent(currentBackup())) {
+        browserRecoveryAvailable = true;
+        preserveRecoverySnapshot(recoveryAccount, backup).catch(error => console.warn('[Persona AU Manager] Could not preserve divergent recovery copy', error));
+        toastr.info('이 브라우저에 서버 설정과 다른 AU 기록이 있습니다. AU 관리창의 복구 안내에서 확인할 수 있습니다.');
+        if (dialog?.open) renderRecoveryOptions(dialog.persona);
+    }
+}).catch(error => console.warn('[Persona AU Manager] Browser recovery copy unavailable', error));
 updateLauncher();
 refreshAvatar();
 eventSource.on(event_types.PERSONA_CHANGED, () => { closeQuickMenu(); if (dialog?.open) dialog.close(); updateLauncher(); refreshAvatar(); });
 eventSource.on(event_types.PERSONA_DELETED, ({ avatarId, name }) => {
-    const data = settings();
-    let changed = false;
-    if (Object.hasOwn(data.personaHistoryByAvatar, avatarId)) {
-        delete data.personaHistoryByAvatar[avatarId];
-        changed = true;
+    // ST can delete personas during restore and other bulk operations. Preserve
+    // AU records so a removed avatar does not silently destroy its history.
+    if (avatarId && name && settings().personaHistoryByAvatar[avatarId]?.length) {
+        (settings().archivedPersonaNamesByAvatar ??= {})[avatarId] = name;
+        queueSave();
     }
-    if (Object.hasOwn(data.activeVersionByAvatar, avatarId)) {
-        delete data.activeVersionByAvatar[avatarId];
-        changed = true;
-    }
-    // Legacy entries were keyed by name. Keep them while another persona
-    // with that name exists; otherwise the old AU data becomes orphaned.
-    if (name && !Object.values(power_user.personas).includes(name)) {
-        if (data.personaHistory && Object.hasOwn(data.personaHistory, name)) {
-            delete data.personaHistory[name];
-            changed = true;
-        }
-        if (data.activeVersionName && Object.hasOwn(data.activeVersionName, name)) {
-            delete data.activeVersionName[name];
-            changed = true;
-        }
-    }
-    if (changed) saveSettingsDebounced();
     updateLauncher();
     refreshAvatar();
 });
-eventSource.on(event_types.SETTINGS_UPDATED, () => { updateLauncher(); refreshAvatar(); });
+eventSource.on(event_types.SETTINGS_UPDATED, () => {
+    updateLauncher();
+    refreshAvatar();
+    if (saveGeneration !== verifiedGeneration) {
+        clearTimeout(verificationTimer);
+        verificationTimer = setTimeout(verifyServerSave, 100);
+    }
+});
 eventSource.on(event_types.PERSONA_CREATED, updateLauncher);
 eventSource.on(event_types.PERSONA_RENAMED, () => {
     updateLauncher();
